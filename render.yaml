@@ -1,0 +1,25 @@
+services:
+  # 1. High-Performance Redis Service
+  - type: redis
+    name: render-redis-cache
+    ipAllowList: [] # Adjust if you want external Redis access, else leave empty for internal only
+    plan: free # Change to starter/standard for higher performance
+    maxmemoryPolicy: allkeys-lru
+
+  # 2. Our Caching API Server
+  - type: web
+    name: redis-caching-api
+    env: docker
+    region: ohio
+    plan: free # Change to standard/pro for higher scale
+    envVars:
+      # Automatically connect to our Render Redis instance
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: render-redis-cache
+          property: connectionString
+      # Define your secure API Key here
+      - key: API_KEY
+        generateValue: true # Render will auto-generate a secure random key
+    healthCheckPath: /health
