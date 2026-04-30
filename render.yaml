@@ -10,7 +10,6 @@ services:
   - type: web
     name: redis-caching-api
     env: docker
-    region: ohio
     plan: free # Change to standard/pro for higher scale
     envVars:
       # Automatically connect to our Render Redis instance
