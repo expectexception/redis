@@ -124,7 +124,7 @@ function startWorkers() {
                 console.log(`🧹 Tag cleaner: removed ${cleaned} stale tag references`);
             }
         } catch (err) {
-            console.error('Tag cleaner worker error:', err.message);
+            console.error('Tag cleaner worker error:', err.stack);
         }
     }, config.WORKER_EVICTION_CHECK_MS);
     intervals.push(tagCleanerWorker);
