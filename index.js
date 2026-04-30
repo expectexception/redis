@@ -121,14 +121,17 @@ app.post('/api/cache/flush', authenticate, async (req, res) => {
 
 // Start the Server
 async function startServer() {
+    // Start listening immediately so Render detects the open port
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 Caching API server is running on port ${PORT}`);
+    });
+
     try {
+        // Connect to Redis in the background
         await redisClient.connect();
-        app.listen(PORT, () => {
-            console.log(`🚀 Caching API server is running on port ${PORT}`);
-        });
     } catch (err) {
-        console.error('Failed to start server:', err);
-        process.exit(1);
+        // If initial connection fails (e.g. DNS not ready yet), node-redis will keep retrying in the background
+        console.error('Initial Redis connection error (will keep retrying):', err.message);
     }
 }
 
