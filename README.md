@@ -1,113 +1,116 @@
-# ⚡ Ultimate Redis Caching API (High-End)
+# ⚡ Redis Caching Server v2.1
 
-A production-ready, ultra-fast Caching Server that wraps Redis in a secure REST API. Designed to be deployed on Render and used as a global caching layer for all your projects (Frontend, Backend, Edge, or Mobile).
+Language-agnostic caching service. Deploy once, use from **any** project in **any** language via REST API. Includes ready-made SDKs for JavaScript and Python.
 
-## 🚀 Key Features
-- **Global Access**: Connect to your cache from anywhere via simple HTTP calls.
-- **High Performance**: Built-in Gzip compression, multi-core clustering, and Redis pipelining.
-- **Secure**: Protected by API Key authentication (Bearer token or X-API-Key).
-- **Safe Load Handling**: Automatic rate-limiting (300 req/min) to prevent abuse.
-- **Batch Operations**: Save or retrieve up to 100 keys in a single request for maximum speed.
-- **Auto-Cleanup**: Enforced TTL (Time-to-Live) support to keep your memory clean.
+## Quick Start
 
----
-
-## 🛠️ Deployment Instructions (Render)
-
-1. **Push to GitHub**: If you haven't already, push this folder to your GitHub account.
-2. **Deploy Blueprint**:
-   - Go to your [Render Dashboard](https://dashboard.render.com).
-   - Click **New** -> **Blueprint**.
-   - Select your repository.
-3. **Wait for Setup**: Render will automatically create:
-   - A managed **Redis Instance** (Private).
-   - A **Docker Web Service** (Public API).
-4. **Get your API Key**:
-   - Once live, go to your **Web Service** -> **Environment** tab.
-   - Copy the value of `API_KEY`.
-
----
-
-## 📡 API Documentation
-
-All routes (except `/health`) require the `Authorization: Bearer <YOUR_API_KEY>` header.
-
-### 1. Set a Cache Value
-`POST /api/cache`
-```json
-{
-  "key": "user_123",
-  "value": { "name": "Rajat", "premium": true },
-  "ttl": 3600 
-}
-```
-*Note: `ttl` is in seconds (default 3600).*
-
-### 2. Get a Cache Value
-`GET /api/cache/:key`
-Returns the value (auto-parses JSON) and the remaining TTL.
-
-### 3. Batch Set (Fastest for multiple keys)
-`POST /api/cache/batch`
-```json
-{
-  "entries": [
-    { "key": "a", "value": 1 },
-    { "key": "b", "value": 2 }
-  ],
-  "ttl": 600
-}
-```
-
-### 4. Batch Get
-`GET /api/cache/batch?keys=key1,key2,key3`
-
-### 5. Update TTL
-`PUT /api/cache/:key/ttl`
-```json
-{ "ttl": 7200 }
-```
-
-### 6. Stats & Health
-- `GET /health`: Check server and Redis status (Public).
-- `GET /api/cache/stats`: Detailed Redis memory and performance stats (Protected).
-
----
-
-## 💻 Usage Examples
-
-### 1. Node.js (Fetch)
-```javascript
-const response = await fetch('https://your-app.onrender.com/api/cache/my_key', {
-  headers: { 'Authorization': 'Bearer YOUR_API_KEY' }
-});
-const data = await response.json();
-console.log(data.value);
-```
-
-### 2. Python (Requests)
-```python
-import requests
-
-url = "https://your-app.onrender.com/api/cache"
-headers = {"Authorization": "Bearer YOUR_API_KEY"}
-data = {"key": "score", "value": 100, "ttl": 300}
-
-requests.post(url, json=data, headers=headers)
-```
-
-### 3. cURL
 ```bash
-curl -H "Authorization: Bearer YOUR_API_KEY" https://your-app.onrender.com/api/cache/my_key
+# 1. Clone & install
+npm install
+
+# 2. Set env (or copy .env.example to .env)
+export REDIS_URL=redis://localhost:6379
+export API_KEY=your-secret-key
+
+# 3. Run
+npm start
 ```
 
----
+## SDKs
 
-## 🛡️ Best Practices
-1. **Always use TTL**: Don't store data forever. Use `ttl` to keep your Redis instance lean and fast.
-2. **Use Batching**: If you need to fetch/save more than 2 keys, use the `/batch` endpoints. It reduces network latency significantly.
-3. **Keep Keys Short**: Use colon-separated namespacing (e.g., `prod:users:123`) for better organization.
-4. **1MB Limit**: This server rejects single values larger than 1MB to ensure high performance.
+| Language | File | Install |
+|----------|------|---------|
+| **JavaScript** (Node/Browser/Deno) | `sdk/cache-client.js` | Copy or `require()` |
+| **Python** (Django/Flask/FastAPI) | `sdk/python/cache_client.py` | `pip install requests` then copy, or `pip install -e sdk/python` |
+| **Any language** | `sdk/REST_API.md` | cURL/Go/PHP/Ruby/Java examples |
 
-## 📝 License
-ISC - Use it for any project you want!
+### Python
+```python
+from cache_client import CacheClient
+cache = CacheClient(url="https://your-app.onrender.com", api_key="KEY", namespace="my-project")
+cache.set("user:123", {"name": "Rajat"}, ttl=3600, tags=["users"])
+user = cache.get("user:123")
+```
+
+### JavaScript
+```javascript
+const createCacheClient = require('./sdk/cache-client');
+const cache = createCacheClient({ url: 'https://your-app.onrender.com', apiKey: 'KEY', namespace: 'my-project' });
+await cache.set('user:123', { name: 'Rajat' }, { ttl: 3600, tags: ['users'] });
+const user = await cache.get('user:123');
+```
+
+### cURL (any language)
+```bash
+curl -X POST https://your-app.onrender.com/api/cache \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "X-Namespace: my-project" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"user:123","value":{"name":"Rajat"},"ttl":3600}'
+```
+
+## Features
+
+- **Namespace isolation** — each project gets own keyspace, no collisions
+- **All data types** — string, number, boolean, null, Date, Buffer, object, array
+- **Data structures** — Hash, List, Set via REST endpoints
+- **Tag-based invalidation** — tag keys, bulk invalidate by tag
+- **Batch ops** — up to 500 keys per request, pipelined to Redis
+- **Atomic counters** — incr/decr for views, stock, rate tracking
+- **Cache-aside** — compute-or-fetch pattern built in
+- **Background workers** — stats aggregator, memory watchdog, stale tag cleaner
+- **Request tracing** — X-Request-Id on every response
+- **Multi-core clustering** — auto-forks in production on multi-CPU machines
+
+## Architecture
+
+```
+server.js                    # entry point + cluster manager
+src/
+├── config.js                # centralized config
+├── redis-client.js           # singleton + reconnect
+├── helpers.js                # namespace keys, v2 serializer, validation
+├── workers.js                # background workers (stats, memory, tags)
+├── middleware/
+│   ├── auth.js               # API key + namespace extraction
+│   ├── redis-guard.js        # 503 when Redis down
+│   └── rate-limiter.js       # read/write rate limits
+└── routes/
+    ├── cache.js              # all cache endpoints
+    └── health.js             # health + latency check
+sdk/
+├── cache-client.js           # JavaScript SDK
+├── REST_API.md               # Generic REST reference (cURL/Go/PHP/Ruby/Java)
+└── python/
+    ├── cache_client.py       # Python SDK
+    ├── setup.py              # pip installable
+    └── README.md             # Python usage docs
+```
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (public) |
+| POST | `/api/cache` | Set key |
+| GET | `/api/cache/:key` | Get key |
+| DELETE | `/api/cache/:key` | Delete key |
+| PATCH | `/api/cache/:key` | Update value/TTL |
+| POST | `/api/cache/batch` | Batch set |
+| GET | `/api/cache/batch?keys=a,b` | Batch get |
+| GET | `/api/cache/keys?pattern=*` | List keys |
+| POST | `/api/cache/invalidate` | Delete by pattern/tags |
+| POST | `/api/cache/compute` | Cache-aside check |
+| POST | `/api/cache/incr` | Atomic increment |
+| POST | `/api/cache/hash` | Hash ops |
+| POST | `/api/cache/list` | List ops |
+| POST | `/api/cache/set` | Set ops |
+| POST | `/api/cache/flush` | Flush namespace |
+| GET | `/api/cache/stats` | Stats |
+
+## Deploy on Render
+
+1. Push to GitHub
+2. Dashboard → New → Blueprint → select repo
+3. Render auto-creates Redis + API server
+4. Copy `API_KEY` from Environment tab

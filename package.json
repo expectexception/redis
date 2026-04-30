@@ -1,17 +1,18 @@
 {
   "name": "redis-caching-server",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "High-performance Redis caching API with namespace isolation, tag invalidation, workers, and universal client SDK",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js",
+    "test": "echo \"No tests yet\" && exit 0"
   },
-  "keywords": [],
+  "keywords": ["redis", "cache", "api", "caching-server"],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "cluster": "^0.7.7",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
