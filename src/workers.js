@@ -58,6 +58,14 @@ function startWorkers() {
 
             if (frag > 1.5) {
                 console.warn(`⚠️  Redis memory fragmentation high: ${frag.toFixed(2)} (>1.5 = wasteful)`);
+                try {
+                    if (typeof client.memoryPurge === 'function') {
+                        await client.memoryPurge();
+                        console.log('🧹 Triggered MEMORY PURGE to reduce fragmentation');
+                    }
+                } catch (e) {
+                    console.error('Failed to trigger MEMORY PURGE:', e.message);
+                }
             }
 
             // Check eviction stats
@@ -78,34 +86,38 @@ function startWorkers() {
         if (!isReady()) return;
         try {
             let cleaned = 0;
-            for await (const tagKey of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
-                const members = await client.sMembers(tagKey);
-                if (members.length === 0) {
-                    await client.del(tagKey);
-                    cleaned++;
-                    continue;
+            for await (const scanResult of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
+                const tagKeys = Array.isArray(scanResult) ? scanResult : [scanResult];
+                
+                for (const tagKey of tagKeys) {
+                    const members = await client.sMembers(tagKey);
+                    if (members.length === 0) {
+                        await client.del(tagKey);
+                        cleaned++;
+                        continue;
+                    }
+
+                    // Check which tagged keys still exist
+                    const pipeline = client.multi();
+                    for (const m of members) {
+                        pipeline.exists(m);
+                    }
+                    const results = await pipeline.exec();
+
+                    const toRemove = [];
+                    members.forEach((m, i) => {
+                        if (results[i] === 0) toRemove.push(m);
+                    });
+
+                    if (toRemove.length > 0) {
+                        await client.sRem(tagKey, toRemove);
+                        cleaned += toRemove.length;
+                    }
+
+                    // If tag set is now empty, delete it
+                    const remaining = await client.sCard(tagKey);
+                    if (remaining === 0) await client.del(tagKey);
                 }
-
-                // Check which tagged keys still exist
-                const pipeline = client.multi();
-                for (const m of members) {
-                    pipeline.exists(m);
-                }
-                const results = await pipeline.exec();
-
-                const toRemove = [];
-                members.forEach((m, i) => {
-                    if (results[i] === 0) toRemove.push(m);
-                });
-
-                if (toRemove.length > 0) {
-                    await client.sRem(tagKey, toRemove);
-                    cleaned += toRemove.length;
-                }
-
-                // If tag set is now empty, delete it
-                const remaining = await client.sCard(tagKey);
-                if (remaining === 0) await client.del(tagKey);
             }
 
             if (cleaned > 0) {
