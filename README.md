@@ -59,6 +59,7 @@ curl -X POST https://your-app.onrender.com/api/cache \
 - **Atomic counters** — incr/decr for views, stock, rate tracking
 - **Cache-aside** — compute-or-fetch pattern built in
 - **Background workers** — stats aggregator, memory watchdog, stale tag cleaner
+- **Auto-wake mechanism** — pings itself to prevent Render free-tier from sleeping
 - **Request tracing** — X-Request-Id on every response
 - **Multi-core clustering** — auto-forks in production on multi-CPU machines
 

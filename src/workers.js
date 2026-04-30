@@ -129,6 +129,23 @@ function startWorkers() {
     }, config.WORKER_EVICTION_CHECK_MS);
     intervals.push(tagCleanerWorker);
 
+    // ── Worker 4: Render Auto-Wake ──────────────────────────────────
+    // Pings its own URL every 14 minutes to prevent Render free tier from sleeping
+    if (config.RENDER_EXTERNAL_URL) {
+        const pingInterval = setInterval(() => {
+            const proto = config.RENDER_EXTERNAL_URL.startsWith('https') ? require('https') : require('http');
+            const url = config.RENDER_EXTERNAL_URL.endsWith('/') ? config.RENDER_EXTERNAL_URL + 'health' : config.RENDER_EXTERNAL_URL + '/health';
+            proto.get(url, (res) => {
+                if (res.statusCode === 200) {
+                    console.log(`⏰ Auto-wake ping successful: ${url}`);
+                }
+            }).on('error', (err) => {
+                console.error(`Auto-wake ping failed: ${err.message}`);
+            });
+        }, 14 * 60 * 1000); // 14 minutes
+        intervals.push(pingInterval);
+    }
+
     console.log('✅ All background workers started');
 }
 

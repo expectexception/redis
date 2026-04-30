@@ -5,6 +5,7 @@ module.exports = {
     PORT: parseInt(process.env.PORT, 10) || 3000,
     NODE_ENV: process.env.NODE_ENV || 'development',
     IS_PRODUCTION: process.env.NODE_ENV === 'production',
+    RENDER_EXTERNAL_URL: process.env.RENDER_EXTERNAL_URL || process.env.SELF_PING_URL,
 
     // ─── Redis ───────────────────────────────────────
     REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
