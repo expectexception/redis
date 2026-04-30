@@ -2,6 +2,7 @@ services:
   # 1. High-Performance Redis Service
   - type: redis
     name: render-redis-cache
+    region: oregon
     ipAllowList: [] # Adjust if you want external Redis access, else leave empty for internal only
     plan: free # Change to starter/standard for higher performance
     maxmemoryPolicy: allkeys-lru
@@ -10,6 +11,7 @@ services:
   - type: web
     name: redis-caching-api
     env: docker
+    region: oregon
     plan: free # Change to standard/pro for higher scale
     envVars:
       # Automatically connect to our Render Redis instance
