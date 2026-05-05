@@ -35,7 +35,13 @@ module.exports = {
     WORKER_MEMORY_WARN_MB: 200,
     WORKER_EVICTION_CHECK_MS: 300_000,
 
+    // ─── Distributed locking (stampede protection) ───
+    // How long a compute lock is held before it auto-expires (seconds).
+    // Must be > your worst-case compute time.
+    DISTRIBUTED_LOCK_TTL_S: 10,
+
     // ─── Namespaces ──────────────────────────────────
     NAMESPACE_SEPARATOR: '::',
     DEFAULT_NAMESPACE: 'default',
 };
+

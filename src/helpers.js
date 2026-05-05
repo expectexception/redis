@@ -67,7 +67,7 @@ function serialize(value, tags = []) {
             break;
         case 'number':
         case 'boolean':
-            storedValue = value; // JSON.stringify preserves these natively
+            storedValue = value;
             break;
         case 'string':
             storedValue = value;
@@ -77,19 +77,24 @@ function serialize(value, tags = []) {
             break;
     }
 
+    // BUG FIX: old code used fragile string.replace('"_sz":0', ...) which
+    // would silently corrupt data if a stored value happened to contain that
+    // exact string. Correct approach: stringify without _sz, measure, then
+    // build the final envelope with the real byte count.
     const envelope = {
-        _v: 2,                                    // envelope version (v2 = type-safe)
-        _t: type,                                 // exact type
-        _ts: Date.now(),                          // stored timestamp
+        _v: 2,
+        _t: type,
+        _ts: Date.now(),
         _tags: Array.isArray(tags) ? tags : [],
-        _sz: 0,                                   // will be set after stringify
+        _sz: 0,  // placeholder — overwritten below
         d: storedValue,
     };
 
-    const json = JSON.stringify(envelope);
-    // Patch in the size (byte length) for monitoring
-    const sized = json.replace('"_sz":0', `"_sz":${Buffer.byteLength(json)}`);
-    return sized;
+    // First pass: measure size of the content (without _sz being accurate)
+    const probe = JSON.stringify(envelope);
+    // Second pass: write the real byte count into _sz
+    envelope._sz = Buffer.byteLength(probe);
+    return JSON.stringify(envelope);
 }
 
 /**

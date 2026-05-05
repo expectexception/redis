@@ -11,7 +11,6 @@ function startWorkers() {
     console.log(`🔧 Starting background workers (pid ${process.pid})`);
 
     // ── Worker 1: Stats Aggregator ──────────────────────────────────
-
     // Collects server metrics every 30s for monitoring
     const statsWorker = setInterval(async () => {
         if (!isReady()) return;
@@ -33,16 +32,18 @@ function startWorkers() {
 
             // Store rolling stats in Redis itself (last 100 snapshots)
             const statsKey = '__system::stats_snapshots';
-            await client.lPush(statsKey, JSON.stringify(snapshot));
-            await client.lTrim(statsKey, 0, 99);
-            await client.expire(statsKey, 86400); // 24h TTL on stats
+            const pipeline = client.multi();
+            pipeline.lPush(statsKey, JSON.stringify(snapshot));
+            pipeline.lTrim(statsKey, 0, 99);
+            pipeline.expire(statsKey, 86400); // 24h TTL on stats
+            await pipeline.exec();
         } catch (err) {
             console.error('Stats worker error:', err.message);
         }
     }, config.WORKER_STATS_INTERVAL_MS);
     intervals.push(statsWorker);
 
-    // ── Worker 2: Memory Watchdog ───────────────────────────────────
+    // ── Worker 2: Memory Watchdog ────────────────────────────────────
     // Warns if Node.js or Redis memory is getting high
     const memoryWorker = setInterval(async () => {
         const rss = process.memoryUsage().rss / 1024 / 1024;
@@ -81,15 +82,26 @@ function startWorkers() {
     intervals.push(memoryWorker);
 
     // ── Worker 3: Stale Tag Cleaner ─────────────────────────────────
-    // Cleans up tag indexes that point to expired keys
+    // Cleans up tag indexes that point to expired keys.
+    //
+    // BUG FIX: scanIterator in node-redis v4/v5 yields individual key STRINGS,
+    // NOT arrays. The old code did `Array.isArray(scanResult) ? scanResult : [scanResult]`
+    // which was always false — it accidentally worked but the variable naming was
+    // wrong and misleading. Fixed to iterate tagKey strings directly.
+    //
+    // PERF: Batch tag-sets in groups of TAG_BATCH before processing, so we're
+    // not context-switching for every single tag key in large keyspaces.
     const tagCleanerWorker = setInterval(async () => {
         if (!isReady()) return;
         try {
             let cleaned = 0;
-            for await (const scanResult of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
-                const tagKeys = Array.isArray(scanResult) ? scanResult : [scanResult];
-                
-                for (const tagKey of tagKeys) {
+            const TAG_BATCH = 50;
+            let tagBatch = [];
+
+            const flushBatch = async () => {
+                if (tagBatch.length === 0) return;
+
+                for (const tagKey of tagBatch) {
                     const members = await client.sMembers(tagKey);
                     if (members.length === 0) {
                         await client.del(tagKey);
@@ -97,28 +109,32 @@ function startWorkers() {
                         continue;
                     }
 
-                    // Check which tagged keys still exist
+                    // Pipeline all EXISTS checks for this tag's members at once
                     const pipeline = client.multi();
-                    for (const m of members) {
-                        pipeline.exists(m);
-                    }
+                    for (const m of members) pipeline.exists(m);
                     const results = await pipeline.exec();
 
-                    const toRemove = [];
-                    members.forEach((m, i) => {
-                        if (results[i] === 0) toRemove.push(m);
-                    });
+                    const toRemove = members.filter((_, i) => results[i] === 0);
 
                     if (toRemove.length > 0) {
                         await client.sRem(tagKey, toRemove);
                         cleaned += toRemove.length;
                     }
 
-                    // If tag set is now empty, delete it
+                    // Delete the tag set itself if now empty
                     const remaining = await client.sCard(tagKey);
                     if (remaining === 0) await client.del(tagKey);
                 }
+
+                tagBatch = [];
+            };
+
+            for await (const tagKey of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
+                // tagKey is a plain string — no Array.isArray wrapping needed
+                tagBatch.push(tagKey);
+                if (tagBatch.length >= TAG_BATCH) await flushBatch();
             }
+            await flushBatch(); // flush any remainder
 
             if (cleaned > 0) {
                 console.log(`🧹 Tag cleaner: removed ${cleaned} stale tag references`);
@@ -134,7 +150,9 @@ function startWorkers() {
     if (config.RENDER_EXTERNAL_URL) {
         const pingInterval = setInterval(() => {
             const proto = config.RENDER_EXTERNAL_URL.startsWith('https') ? require('https') : require('http');
-            const url = config.RENDER_EXTERNAL_URL.endsWith('/') ? config.RENDER_EXTERNAL_URL + 'health' : config.RENDER_EXTERNAL_URL + '/health';
+            const url = config.RENDER_EXTERNAL_URL.endsWith('/')
+                ? config.RENDER_EXTERNAL_URL + 'health'
+                : config.RENDER_EXTERNAL_URL + '/health';
             proto.get(url, (res) => {
                 if (res.statusCode === 200) {
                     console.log(`⏰ Auto-wake ping successful: ${url}`);

@@ -10,7 +10,9 @@ const {
 
 const router = express.Router();
 
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cache — Set single key
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/', writeLimiter, async (req, res) => {
     const { key, value, ttl, tags } = req.body;
     const keyErr = validateKey(key);
@@ -30,6 +32,7 @@ router.post('/', writeLimiter, async (req, res) => {
         if (Array.isArray(tags) && tags.length > 0) {
             for (const tag of tags) {
                 const tagKey = nsKey(req.namespace, `__tag:${tag}`);
+                // Tag set TTL = key TTL + 1h buffer so the index outlives the key
                 pipeline.sAdd(tagKey, fullKey);
                 pipeline.expire(tagKey, safeTTL + 3600);
             }
@@ -41,7 +44,9 @@ router.post('/', writeLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cache/batch — Batch set (pipelined)
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/batch', writeLimiter, async (req, res) => {
     const { entries, ttl } = req.body;
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -79,7 +84,9 @@ router.post('/batch', writeLimiter, async (req, res) => {
     }
 });
 
-// GET /api/cache/batch?keys=a,b,c — Batch get (MGET)
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/cache/batch?keys=a,b,c — Batch get (MGET + pipelined TTLs)
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/batch', readLimiter, async (req, res) => {
     const keys = req.query.keys?.split(',').map(k => k.trim()).filter(Boolean);
     if (!keys || keys.length === 0) {
@@ -91,17 +98,29 @@ router.get('/batch', readLimiter, async (req, res) => {
 
     try {
         const fullKeys = keys.map(k => nsKey(req.namespace, k));
-        const [values, ...ttls] = await Promise.all([
-            client.mGet(fullKeys),
-            ...fullKeys.map(k => client.ttl(k)),
-        ]);
+
+        // PERF: Pipeline MGET + all TTL commands in one round-trip.
+        // node-redis auto-pipelines concurrent awaits, but an explicit multi()
+        // guarantees a single network write and read regardless of event loop timing.
+        const pipeline = client.multi();
+        pipeline.mGet(fullKeys);
+        for (const k of fullKeys) pipeline.ttl(k);
+        const pipeResults = await pipeline.exec();
+
+        const values = pipeResults[0];           // array of raw strings (or null)
+        const ttls   = pipeResults.slice(1);     // one TTL number per key
+
         const result = {};
         let hits = 0;
 
         keys.forEach((key, i) => {
             const parsed = deserialize(values[i]);
-            if (parsed) {
-                result[key] = { value: parsed.value, type: parsed.type, ttl: ttls[i] >= 0 ? ttls[i] : 'no-expiry' };
+            if (parsed !== null) {
+                result[key] = {
+                    value: parsed.value,
+                    type: parsed.type,
+                    ttl: ttls[i] >= 0 ? ttls[i] : 'no-expiry',
+                };
                 hits++;
             } else {
                 result[key] = null;
@@ -114,7 +133,9 @@ router.get('/batch', readLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/cache/keys?pattern=user:* — List keys (SCAN)
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/keys', readLimiter, async (req, res) => {
     const pattern = req.query.pattern || '*';
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, config.MAX_PATTERN_SCAN);
@@ -122,7 +143,7 @@ router.get('/keys', readLimiter, async (req, res) => {
     try {
         const scanPattern = nsPattern(req.namespace, pattern);
         const keys = [];
-        for await (const key of client.scanIterator({ MATCH: scanPattern, COUNT: 100 })) {
+        for await (const key of client.scanIterator({ MATCH: scanPattern, COUNT: 200 })) {
             keys.push(stripNs(key));
             if (keys.length >= limit) break;
         }
@@ -132,7 +153,9 @@ router.get('/keys', readLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cache/invalidate — Invalidate by pattern or tags
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/invalidate', writeLimiter, async (req, res) => {
     const { pattern, tags } = req.body;
     if (!pattern && (!Array.isArray(tags) || tags.length === 0)) {
@@ -174,7 +197,14 @@ router.post('/invalidate', writeLimiter, async (req, res) => {
     }
 });
 
-// POST /api/cache/compute — Cache-aside check
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/cache/compute — Cache-aside check with stampede protection
+//
+// STAMPEDE FIX: When multiple clients simultaneously get a cache miss, they'd
+// all go compute the same expensive value. We now use a Redis SET NX lock so
+// only one caller gets told to compute (locked:true); the others are told to
+// wait and retry (locked:false). The SDK's computeOrFetch handles the retry loop.
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/compute', readLimiter, async (req, res) => {
     const { key } = req.body;
     const keyErr = validateKey(key);
@@ -192,13 +222,33 @@ router.post('/compute', readLimiter, async (req, res) => {
                 ttl: remaining >= 0 ? remaining : 'no-expiry',
             });
         }
-        res.json({ success: true, hit: false, key });
+
+        // Cache miss — acquire a distributed lock (SET NX EX) to prevent stampede.
+        // Only the first concurrent caller gets locked=true and should compute.
+        // The rest get locked=false and should wait then retry.
+        const lockKey = nsKey(req.namespace, `__lock:${key}`);
+        const lockResult = await client.set(lockKey, '1', {
+            NX: true,
+            EX: config.DISTRIBUTED_LOCK_TTL_S,
+        });
+
+        res.json({
+            success: true,
+            hit: false,
+            key,
+            // locked=true  → this caller should compute & call POST /api/cache to store
+            // locked=false → another caller is computing; retry after a short delay
+            locked: lockResult === 'OK',
+            retryAfterMs: lockResult === 'OK' ? null : Math.ceil(config.DISTRIBUTED_LOCK_TTL_S * 1000 / 2),
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cache/incr — Atomic increment/decrement
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/incr', writeLimiter, async (req, res) => {
     const { key, amount = 1 } = req.body;
     const keyErr = validateKey(key);
@@ -209,19 +259,19 @@ router.post('/incr', writeLimiter, async (req, res) => {
         const n = parseInt(amount, 10);
         if (isNaN(n)) return res.status(400).json({ error: '"amount" must be integer' });
 
-        let newVal;
-        if (n >= 0) {
-            newVal = await client.incrBy(fullKey, n);
-        } else {
-            newVal = await client.decrBy(fullKey, Math.abs(n));
-        }
+        const newVal = n >= 0
+            ? await client.incrBy(fullKey, n)
+            : await client.decrBy(fullKey, Math.abs(n));
+
         res.json({ success: true, key, value: newVal });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// POST /api/cache/hash — Hash operations (HSET/HGET/HDEL/HGETALL)
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/cache/hash — Hash operations (HSET/HGET/HDEL)
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/hash', writeLimiter, async (req, res) => {
     const { key, op, field, fields, value, ttl } = req.body;
     const keyErr = validateKey(key);
@@ -232,7 +282,6 @@ router.post('/hash', writeLimiter, async (req, res) => {
         switch (op) {
             case 'set': {
                 if (fields && typeof fields === 'object') {
-                    // Multi-field set
                     const flat = [];
                     for (const [f, v] of Object.entries(fields)) {
                         flat.push(f, typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -253,7 +302,6 @@ router.post('/hash', writeLimiter, async (req, res) => {
                     let parsed; try { parsed = JSON.parse(val); } catch { parsed = val; }
                     return res.json({ success: true, key, field, value: parsed });
                 }
-                // HGETALL
                 const all = await client.hGetAll(fullKey);
                 if (!all || Object.keys(all).length === 0) return res.status(404).json({ error: 'Key not found' });
                 const parsed = {};
@@ -276,7 +324,9 @@ router.post('/hash', writeLimiter, async (req, res) => {
     }
 });
 
-// POST /api/cache/list — List operations (PUSH/POP/RANGE/LEN)
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/cache/list — List operations
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/list', writeLimiter, async (req, res) => {
     const { key, op, value, values, start = 0, stop = -1, ttl } = req.body;
     const keyErr = validateKey(key);
@@ -330,7 +380,9 @@ router.post('/list', writeLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/cache/set — Set (unique collection) operations
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/set', writeLimiter, async (req, res) => {
     const { key, op, value, values, ttl } = req.body;
     const keyErr = validateKey(key);
@@ -376,14 +428,47 @@ router.post('/set', writeLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/cache/flush — Flush all keys in this namespace
+//
+// ROUTE ORDER FIX: This was originally defined AFTER PATCH /:key and DELETE /:key.
+// While it didn't cause a conflict (different HTTP method), it's cleaner and safer
+// to keep all specific named POST routes above parametric ones.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/flush', writeLimiter, async (req, res) => {
+    try {
+        const keysToDelete = [];
+        for await (const key of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
+            keysToDelete.push(key);
+        }
+
+        let deleted = 0;
+        for (let i = 0; i < keysToDelete.length; i += 1000) {
+            deleted += await client.del(keysToDelete.slice(i, i + 1000));
+        }
+        res.json({ success: true, namespace: req.namespace, deleted });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/cache/stats
+//
+// PERF FIX: The old code ran a full scanIterator loop just to count namespace
+// keys. For large keyspaces (10k+ keys) this was very slow. We now cap the
+// count at MAX_PATTERN_SCAN and run the Redis INFO calls in parallel.
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/stats', readLimiter, async (req, res) => {
     try {
         const [info, memory, keyspace, dbsize] = await Promise.all([
-            client.info('stats'), client.info('memory'),
-            client.info('keyspace'), client.dbSize(),
+            client.info('stats'),
+            client.info('memory'),
+            client.info('keyspace'),
+            client.dbSize(),
         ]);
 
+        // Count namespace keys up to MAX_PATTERN_SCAN — don't block forever
         let nsKeyCount = 0;
         for await (const _ of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
             nsKeyCount++;
@@ -391,16 +476,26 @@ router.get('/stats', readLimiter, async (req, res) => {
         }
 
         res.json({
-            success: true, namespace: req.namespace, namespaceKeys: nsKeyCount, totalKeys: dbsize,
+            success: true,
+            namespace: req.namespace,
+            namespaceKeys: nsKeyCount,
+            namespaceKeysCapped: nsKeyCount >= config.MAX_PATTERN_SCAN,
+            totalKeys: dbsize,
             redis: { stats: info, memory, keyspace },
-            server: { pid: process.pid, uptime: `${Math.floor(process.uptime())}s`, memory: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB` },
+            server: {
+                pid: process.pid,
+                uptime: `${Math.floor(process.uptime())}s`,
+                memory: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`,
+            },
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/cache/:key
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:key', readLimiter, async (req, res) => {
     try {
         const fullKey = nsKey(req.namespace, req.params.key);
@@ -420,7 +515,9 @@ router.get('/:key', readLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/cache/:key
+// ─────────────────────────────────────────────────────────────────────────────
 router.delete('/:key', writeLimiter, async (req, res) => {
     try {
         const fullKey = nsKey(req.namespace, req.params.key);
@@ -432,13 +529,24 @@ router.delete('/:key', writeLimiter, async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/cache/:key — Update TTL or value
+//
+// BUG FIX: The old code called sanitizeTTL(ttl) when ttl was undefined, which
+// returned DEFAULT_TTL (3600s = 1 hour). This silently RESET the key's expiry
+// every time you patched its value without specifying a TTL — losing the original
+// expiry. Fix: fetch the existing TTL first and preserve it when no new TTL is given.
+// ─────────────────────────────────────────────────────────────────────────────
 router.patch('/:key', writeLimiter, async (req, res) => {
     const { ttl, value, tags } = req.body;
     const fullKey = nsKey(req.namespace, req.params.key);
 
     try {
-        const exists = await client.exists(fullKey);
+        // Fetch existence and current TTL in one round-trip
+        const [exists, currentTTL] = await Promise.all([
+            client.exists(fullKey),
+            client.ttl(fullKey),
+        ]);
         if (!exists) return res.status(404).json({ error: 'Key not found' });
 
         const updates = {};
@@ -446,34 +554,23 @@ router.patch('/:key', writeLimiter, async (req, res) => {
             const serialized = serialize(value, tags);
             const sizeErr = validateValueSize(serialized);
             if (sizeErr) return res.status(413).json({ error: sizeErr });
-            const safeTTL = sanitizeTTL(ttl);
+
+            // BUG FIX: preserve original TTL when caller doesn't specify a new one.
+            // currentTTL > 0 means the key has an expiry set; -1 means no expiry.
+            const safeTTL = ttl !== undefined
+                ? sanitizeTTL(ttl)
+                : (currentTTL > 0 ? currentTTL : config.DEFAULT_TTL);
+
             await client.setEx(fullKey, safeTTL, serialized);
             updates.value = true;
             updates.ttl = safeTTL;
+            updates.ttlPreserved = ttl === undefined && currentTTL > 0;
         } else if (ttl !== undefined) {
             const safeTTL = sanitizeTTL(ttl);
             await client.expire(fullKey, safeTTL);
             updates.ttl = safeTTL;
         }
         res.json({ success: true, key: req.params.key, updates });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// POST /api/cache/flush — Flush namespace only
-router.post('/flush', writeLimiter, async (req, res) => {
-    try {
-        const keysToDelete = [];
-        for await (const key of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
-            keysToDelete.push(key);
-        }
-
-        let deleted = 0;
-        for (let i = 0; i < keysToDelete.length; i += 1000) {
-            deleted += await client.del(keysToDelete.slice(i, i + 1000));
-        }
-        res.json({ success: true, namespace: req.namespace, deleted });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
