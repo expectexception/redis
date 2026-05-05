@@ -3,22 +3,35 @@ const config = require('./config');
 
 let intervals = [];
 
+const cluster = require('cluster');
+
 /**
  * Background workers that run alongside the server.
  * All workers are interval-based — no separate processes needed.
  */
 function startWorkers() {
-    console.log(`🔧 Starting background workers (pid ${process.pid})`);
+    // Only run maintenance workers (Stats, Memory, Tag Cleaner) in the PRIMARY worker
+    // to avoid redundant load and log noise in clustered environments.
+    const isPrimary = !cluster.isWorker || cluster.worker.id === 1;
+    
+    if (!isPrimary) {
+        console.log(`🔧 Worker ${process.pid} skipping background maintenance (not primary)`);
+        
+        // Non-primary workers still run Auto-Wake if needed (or we can move it to primary only)
+        startAutoWake();
+        return;
+    }
+
+    console.log(`🔧 Starting PRIMARY background workers (pid ${process.pid})`);
 
     // ── Worker 1: Stats Aggregator ──────────────────────────────────
-    // Collects server metrics every 30s for monitoring
     const statsWorker = setInterval(async () => {
         if (!isReady()) return;
         try {
             const memInfo = await client.info('memory');
             const usedMatch = memInfo.match(/used_memory_human:(.+)/);
             const peakMatch = memInfo.match(/used_memory_peak_human:(.+)/);
-            const fragMatch = memInfo.match(/mem_fragmentation_ratio:(.+)/);
+            const fragMatch = memInfo.match(/mem_fragmentation_ratio:([\d.]+)/);
 
             const snapshot = {
                 ts: Date.now(),
@@ -30,12 +43,11 @@ function startWorkers() {
                 dbSize: await client.dbSize(),
             };
 
-            // Store rolling stats in Redis itself (last 100 snapshots)
             const statsKey = '__system::stats_snapshots';
             const pipeline = client.multi();
             pipeline.lPush(statsKey, JSON.stringify(snapshot));
             pipeline.lTrim(statsKey, 0, 99);
-            pipeline.expire(statsKey, 86400); // 24h TTL on stats
+            pipeline.expire(statsKey, 86400);
             await pipeline.exec();
         } catch (err) {
             console.error('Stats worker error:', err.message);
@@ -43,8 +55,7 @@ function startWorkers() {
     }, config.WORKER_STATS_INTERVAL_MS);
     intervals.push(statsWorker);
 
-    // ── Worker 2: Memory Watchdog ────────────────────────────────────
-    // Warns if Node.js or Redis memory is getting high
+    // ── Worker 2: Memory Watchdog + Defrag ──────────────────────────
     const memoryWorker = setInterval(async () => {
         const rss = process.memoryUsage().rss / 1024 / 1024;
         if (rss > config.WORKER_MEMORY_WARN_MB) {
@@ -60,16 +71,25 @@ function startWorkers() {
             if (frag > 1.5) {
                 console.warn(`⚠️  Redis memory fragmentation high: ${frag.toFixed(2)} (>1.5 = wasteful)`);
                 try {
-                    if (typeof client.memoryPurge === 'function') {
-                        await client.memoryPurge();
-                        console.log('🧹 Triggered MEMORY PURGE to reduce fragmentation');
+                    // 1. Trigger JEMALLOC purge
+                    await client.sendCommand(['MEMORY', 'PURGE']);
+                    console.log('🧹 Triggered MEMORY PURGE');
+
+                    // 2. If fragmentation is severe (>2.0), try enabling active defrag if it's off
+                    if (frag > 2.0) {
+                        try {
+                            const configRes = await client.configGet('activedefrag');
+                            if (configRes && configRes.activedefrag === 'no') {
+                                console.log('🚀 Severe fragmentation: enabling active-defrag...');
+                                await client.configSet('activedefrag', 'yes');
+                            }
+                        } catch { /* config command often restricted on managed Redis */ }
                     }
                 } catch (e) {
-                    console.error('Failed to trigger MEMORY PURGE:', e.message);
+                    console.error('Failed to mitigate fragmentation:', e.message);
                 }
             }
 
-            // Check eviction stats
             const statsInfo = await client.info('stats');
             const evictedMatch = statsInfo.match(/evicted_keys:(\d+)/);
             if (evictedMatch && parseInt(evictedMatch[1]) > 0) {
@@ -148,26 +168,32 @@ function startWorkers() {
     }, config.WORKER_EVICTION_CHECK_MS);
     intervals.push(tagCleanerWorker);
 
-    // ── Worker 4: Render Auto-Wake ──────────────────────────────────
-    // Pings its own URL every 14 minutes to prevent Render free tier from sleeping
-    if (config.RENDER_EXTERNAL_URL) {
-        const pingInterval = setInterval(() => {
-            const proto = config.RENDER_EXTERNAL_URL.startsWith('https') ? require('https') : require('http');
-            const url = config.RENDER_EXTERNAL_URL.endsWith('/')
-                ? config.RENDER_EXTERNAL_URL + 'health'
-                : config.RENDER_EXTERNAL_URL + '/health';
-            proto.get(url, (res) => {
-                if (res.statusCode === 200) {
-                    console.log(`⏰ Auto-wake ping successful: ${url}`);
-                }
-            }).on('error', (err) => {
-                console.error(`Auto-wake ping failed: ${err.message}`);
-            });
-        }, 14 * 60 * 1000); // 14 minutes
-        intervals.push(pingInterval);
-    }
+    startAutoWake();
 
     console.log('✅ All background workers started');
+}
+
+/**
+ * Pings its own URL every 14 minutes to prevent Render free tier from sleeping.
+ * This runs on ALL workers to ensure at least one is always up.
+ */
+function startAutoWake() {
+    if (!config.RENDER_EXTERNAL_URL) return;
+
+    const pingInterval = setInterval(() => {
+        const proto = config.RENDER_EXTERNAL_URL.startsWith('https') ? require('https') : require('http');
+        const url = config.RENDER_EXTERNAL_URL.endsWith('/')
+            ? config.RENDER_EXTERNAL_URL + 'health'
+            : config.RENDER_EXTERNAL_URL + '/health';
+        proto.get(url, (res) => {
+            if (res.statusCode === 200) {
+                console.log(`⏰ Auto-wake ping successful: ${url}`);
+            }
+        }).on('error', (err) => {
+            console.error(`Auto-wake ping failed: ${err.message}`);
+        });
+    }, 14 * 60 * 1000); // 14 minutes
+    intervals.push(pingInterval);
 }
 
 function stopWorkers() {

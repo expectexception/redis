@@ -45,7 +45,7 @@ const { startWorkers, stopWorkers } = require('./src/workers');
 const app = express();
 
 // ─── GLOBAL MIDDLEWARE ───────────────────────────────────────────────────────
-app.use(compression({ level: 6, threshold: 1024 }));
+app.use(compression({ level: 9, threshold: 512 }));
 app.use(helmet());
 app.use(cors({
     origin: '*',

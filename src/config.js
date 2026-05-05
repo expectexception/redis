@@ -33,7 +33,7 @@ module.exports = {
     WORKER_STATS_INTERVAL_MS: 30_000,
     WORKER_MEMORY_CHECK_MS: 60_000,
     WORKER_MEMORY_WARN_MB: 200,
-    WORKER_EVICTION_CHECK_MS: 300_000,
+    WORKER_EVICTION_CHECK_MS: 900_000,
 
     // ─── Distributed locking (stampede protection) ───
     // How long a compute lock is held before it auto-expires (seconds).
