@@ -1,14 +1,15 @@
-# ⚡ Redis Caching Server v2.1
+# ⚡ Redis Caching Server v3.0
 
-Language-agnostic caching service. Deploy once, use from **any** project in **any** language via REST API. Includes ready-made SDKs for JavaScript and Python.
+High-performance, language-agnostic caching service. Deploy once, use from **any** project in **any** language via REST API. Engineered for reliability, isolation, and scale.
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 # 1. Clone & install
 npm install
 
-# 2. Set env (or copy .env.example to .env)
+# 2. Configure environment
+# Copy .env.example to .env and set your secrets
 export REDIS_URL=redis://localhost:6379
 export API_KEY=your-secret-key
 
@@ -16,102 +17,105 @@ export API_KEY=your-secret-key
 npm start
 ```
 
-## SDKs
+## 📦 SDKs
 
-| Language | File | Install |
-|----------|------|---------|
-| **JavaScript** (Node/Browser/Deno) | `sdk/cache-client.js` | Copy or `require()` |
-| **Python** (Django/Flask/FastAPI) | `sdk/python/cache_client.py` | `pip install requests` then copy, or `pip install -e sdk/python` |
-| **Any language** | `sdk/REST_API.md` | cURL/Go/PHP/Ruby/Java examples |
+| Language | Client SDK | Best For |
+|----------|------------|----------|
+| **JavaScript** | [`sdk/cache-client.js`](sdk/cache-client.js) | Node.js, Browser, Deno, Bun, Edge |
+| **Python** | [`sdk/python/cache_client.py`](sdk/python/cache_client.py) | Django, Flask, FastAPI (Sync + Async) |
+| **Any Language** | [`sdk/REST_API.md`](sdk/REST_API.md) | Go, Rust, PHP, Ruby, Java, C# |
 
-### Python
+---
+
+## 💎 Premium Features
+
+### 🛡️ Namespace Isolation
+Multi-tenant ready. Each project uses an `X-Namespace` header to keep its keyspace completely isolated. No key collisions, ever.
+
+### 🛡️ Stampede Protection (Compute-or-Fetch)
+Built-in distributed locking. When multiple clients miss the cache simultaneously, only **one** wins the lock to compute the value. Others wait and retry automatically, preventing "cache stampedes" on heavy computations.
+
+### 🏷️ Tag-Based Invalidation
+Assign tags to keys (e.g., `user:123` tagged with `users`). Invalidate thousands of keys at once by tag without expensive pattern scans.
+
+### 🧩 Rich Data Structures
+Go beyond simple strings. Full REST support for:
+- **Hashes**: Field-level updates and retrieval.
+- **Lists**: Pushes, pops, and ranges.
+- **Sets**: Unique collections, membership checks, and sizes.
+
+### ⚡ Performance & Reliability
+- **Pipelined Batching**: Fetch or set up to 500 keys in a single network round-trip.
+- **Type Safety**: Preserves exact JS/Python types (Date, Buffer, Boolean, etc.) through serialization.
+- **Maintenance Workers**: Background agents for stats, memory defragmentation (`MEMORY PURGE`), and stale tag cleanup.
+- **Cluster Support**: Scales across multiple CPU cores automatically.
+
+---
+
+## 🛠️ SDK Usage Examples
+
+### Python (FastAPI / Async)
 ```python
-from cache_client import CacheClient
-cache = CacheClient(url="https://your-app.onrender.com", api_key="KEY", namespace="my-project")
-cache.set("user:123", {"name": "Rajat"}, ttl=3600, tags=["users"])
-user = cache.get("user:123")
+from cache_client import AsyncCacheClient
+
+# Open connection pool on startup
+cache = AsyncCacheClient(url="...", api_key="...", namespace="v1")
+await cache.open()
+
+# Smart Compute (with stampede protection)
+async def get_expensive_report():
+    return await cache.compute_or_fetch(
+        "report:2024", 
+        compute_fn=lambda: db.run_heavy_query(),
+        ttl=3600
+    )
 ```
 
-### JavaScript
+### JavaScript (Node.js)
 ```javascript
-const createCacheClient = require('./sdk/cache-client');
-const cache = createCacheClient({ url: 'https://your-app.onrender.com', apiKey: 'KEY', namespace: 'my-project' });
-await cache.set('user:123', { name: 'Rajat' }, { ttl: 3600, tags: ['users'] });
-const user = await cache.get('user:123');
+const cache = require('./sdk/cache-client')({ url: '...', apiKey: '...' });
+
+// Tagged storage
+await cache.set('profile:123', { name: 'Rajat' }, { tags: ['users', 'vip'] });
+
+// Atomic Invalidation
+await cache.invalidate({ tags: ['users'] });
 ```
 
-### cURL (any language)
-```bash
-curl -X POST https://your-app.onrender.com/api/cache \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "X-Namespace: my-project" \
-  -H "Content-Type: application/json" \
-  -d '{"key":"user:123","value":{"name":"Rajat"},"ttl":3600}'
-```
+---
 
-## Features
+## 🏗️ Architecture
 
-- **Namespace isolation** — each project gets own keyspace, no collisions
-- **All data types** — string, number, boolean, null, Date, Buffer, object, array
-- **Data structures** — Hash, List, Set via REST endpoints
-- **Tag-based invalidation** — tag keys, bulk invalidate by tag
-- **Batch ops** — up to 500 keys per request, pipelined to Redis
-- **Atomic counters** — incr/decr for views, stock, rate tracking
-- **Cache-aside** — compute-or-fetch pattern built in
-- **Background workers** — stats aggregator, memory watchdog, stale tag cleaner
-- **Auto-wake mechanism** — pings itself to prevent Render free-tier from sleeping
-- **Request tracing** — X-Request-Id on every response
-- **Multi-core clustering** — auto-forks in production on multi-CPU machines
-
-## Architecture
-
-```
-server.js                    # entry point + cluster manager
+```text
 src/
-├── config.js                # centralized config
-├── redis-client.js           # singleton + reconnect
-├── helpers.js                # namespace keys, v2 serializer, validation
-├── workers.js                # background workers (stats, memory, tags)
-├── middleware/
-│   ├── auth.js               # API key + namespace extraction
-│   ├── redis-guard.js        # 503 when Redis down
-│   └── rate-limiter.js       # read/write rate limits
-└── routes/
-    ├── cache.js              # all cache endpoints
-    └── health.js             # health + latency check
-sdk/
-├── cache-client.js           # JavaScript SDK
-├── REST_API.md               # Generic REST reference (cURL/Go/PHP/Ruby/Java)
-└── python/
-    ├── cache_client.py       # Python SDK
-    ├── setup.py              # pip installable
-    └── README.md             # Python usage docs
+├── config.js          # Centralized configuration
+├── redis-client.js    # Optimized Redis connector
+├── helpers.js         # v2 Type-safe serializer + NS builder
+├── workers.js         # Background maintenance agents
+├── middleware/        # Security, Auth, Rate Limiting
+└── routes/            # REST API Implementation
 ```
 
-## API Endpoints
+## 📡 API Reference
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check (public) |
-| POST | `/api/cache` | Set key |
-| GET | `/api/cache/:key` | Get key |
-| DELETE | `/api/cache/:key` | Delete key |
-| PATCH | `/api/cache/:key` | Update value/TTL |
-| POST | `/api/cache/batch` | Batch set |
-| GET | `/api/cache/batch?keys=a,b` | Batch get |
-| GET | `/api/cache/keys?pattern=*` | List keys |
-| POST | `/api/cache/invalidate` | Delete by pattern/tags |
-| POST | `/api/cache/compute` | Cache-aside check |
-| POST | `/api/cache/incr` | Atomic increment |
-| POST | `/api/cache/hash` | Hash ops |
-| POST | `/api/cache/list` | List ops |
-| POST | `/api/cache/set` | Set ops |
-| POST | `/api/cache/flush` | Flush namespace |
-| GET | `/api/cache/stats` | Stats |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Liveness & Latency |
+| `POST` | `/api/cache` | Set key (with TTL & Tags) |
+| `GET` | `/api/cache/:key` | Get key value + metadata |
+| `PATCH` | `/api/cache/:key` | Update value/TTL (Preserves expiry) |
+| `POST` | `/api/cache/compute` | Acquire lock for computation |
+| `POST` | `/api/cache/batch` | Atomic Multi-SET |
+| `GET` | `/api/cache/stats` | Real-time Redis & OS metrics |
 
-## Deploy on Render
+---
 
-1. Push to GitHub
-2. Dashboard → New → Blueprint → select repo
-3. Render auto-creates Redis + API server
-4. Copy `API_KEY` from Environment tab
+## ☁️ Deployment
+
+Deploy to **Render** in seconds via `render.yaml`:
+1. Push to GitHub.
+2. Dashboard → New → Blueprint.
+3. Done.
+
+---
+**v3.0.0** • High-Performance Caching Standard

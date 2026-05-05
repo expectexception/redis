@@ -143,8 +143,14 @@ router.get('/keys', readLimiter, async (req, res) => {
     try {
         const scanPattern = nsPattern(req.namespace, pattern);
         const keys = [];
-        for await (const key of client.scanIterator({ MATCH: scanPattern, COUNT: 200 })) {
-            keys.push(stripNs(key));
+        for await (const result of client.scanIterator({ MATCH: scanPattern, COUNT: 200 })) {
+            const batch = Array.isArray(result) ? result : [result];
+            for (const key of batch) {
+                if (key) {
+                    keys.push(stripNs(key));
+                    if (keys.length >= limit) break;
+                }
+            }
             if (keys.length >= limit) break;
         }
         res.json({ success: true, count: keys.length, keys });
@@ -167,8 +173,14 @@ router.post('/invalidate', writeLimiter, async (req, res) => {
 
         if (pattern) {
             const keysToDelete = [];
-            for await (const key of client.scanIterator({ MATCH: nsPattern(req.namespace, pattern), COUNT: 200 })) {
-                keysToDelete.push(key);
+            for await (const result of client.scanIterator({ MATCH: nsPattern(req.namespace, pattern), COUNT: 200 })) {
+                const batch = Array.isArray(result) ? result : [result];
+                for (const key of batch) {
+                    if (key) {
+                        keysToDelete.push(key);
+                        if (keysToDelete.length >= config.MAX_PATTERN_SCAN) break;
+                    }
+                }
                 if (keysToDelete.length >= config.MAX_PATTERN_SCAN) break;
             }
             if (keysToDelete.length > 0) {
@@ -438,8 +450,11 @@ router.post('/set', writeLimiter, async (req, res) => {
 router.post('/flush', writeLimiter, async (req, res) => {
     try {
         const keysToDelete = [];
-        for await (const key of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
-            keysToDelete.push(key);
+        for await (const result of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
+            const batch = Array.isArray(result) ? result : [result];
+            for (const key of batch) {
+                if (key) keysToDelete.push(key);
+            }
         }
 
         let deleted = 0;
@@ -470,8 +485,12 @@ router.get('/stats', readLimiter, async (req, res) => {
 
         // Count namespace keys up to MAX_PATTERN_SCAN — don't block forever
         let nsKeyCount = 0;
-        for await (const _ of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
-            nsKeyCount++;
+        for await (const result of client.scanIterator({ MATCH: nsPattern(req.namespace, '*'), COUNT: 500 })) {
+            const batch = Array.isArray(result) ? result : [result];
+            for (const _ of batch) {
+                nsKeyCount++;
+                if (nsKeyCount >= config.MAX_PATTERN_SCAN) break;
+            }
             if (nsKeyCount >= config.MAX_PATTERN_SCAN) break;
         }
 

@@ -84,10 +84,9 @@ function startWorkers() {
     // ── Worker 3: Stale Tag Cleaner ─────────────────────────────────
     // Cleans up tag indexes that point to expired keys.
     //
-    // BUG FIX: scanIterator in node-redis v4/v5 yields individual key STRINGS,
-    // NOT arrays. The old code did `Array.isArray(scanResult) ? scanResult : [scanResult]`
-    // which was always false — it accidentally worked but the variable naming was
-    // wrong and misleading. Fixed to iterate tagKey strings directly.
+    // BUG FIX: scanIterator behavior varies by version. It may yield individual 
+    // strings OR arrays of strings (especially in newer or specific environments).
+    // The code now robustly handles both cases and filters empty results.
     //
     // PERF: Batch tag-sets in groups of TAG_BATCH before processing, so we're
     // not context-switching for every single tag key in large keyspaces.
@@ -129,10 +128,14 @@ function startWorkers() {
                 tagBatch = [];
             };
 
-            for await (const tagKey of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
-                // tagKey is a plain string — no Array.isArray wrapping needed
-                tagBatch.push(tagKey);
-                if (tagBatch.length >= TAG_BATCH) await flushBatch();
+            for await (const result of client.scanIterator({ MATCH: '*::__tag:*', COUNT: 100 })) {
+                const keys = Array.isArray(result) ? result : [result];
+                for (const key of keys) {
+                    if (key) {
+                        tagBatch.push(key);
+                        if (tagBatch.length >= TAG_BATCH) await flushBatch();
+                    }
+                }
             }
             await flushBatch(); // flush any remainder
 
