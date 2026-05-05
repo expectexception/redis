@@ -203,6 +203,10 @@ class CacheClient:
         data = self._request("GET", "/api/cache/batch", params={"keys": ",".join(keys)})
         return data.get("result", {})
 
+    def delete_many(self, keys: List[str]) -> dict:
+        """Batch delete keys."""
+        return self._request("DELETE", "/api/cache/batch", json_data={"keys": keys})
+
     # ─── Pattern/Tags ─────────────────────────────────────────────────────────
 
     def keys(self, pattern: str = "*", limit: int = 100) -> List[str]:
@@ -531,6 +535,10 @@ class AsyncCacheClient:
     async def get_many(self, keys: List[str]) -> dict:
         data = await self._request("GET", "/api/cache/batch", params={"keys": ",".join(keys)})
         return data.get("result", {})
+
+    async def delete_many(self, keys: List[str]) -> dict:
+        """Batch delete keys."""
+        return await self._request("DELETE", "/api/cache/batch", json_data={"keys": keys})
 
     # ─── Pattern/Tags ─────────────────────────────────────────────────────────
 

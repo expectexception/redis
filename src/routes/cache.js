@@ -134,6 +134,27 @@ router.get('/batch', readLimiter, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/cache/batch — Batch delete keys
+// ─────────────────────────────────────────────────────────────────────────────
+router.delete('/batch', writeLimiter, async (req, res) => {
+    const { keys } = req.body;
+    if (!Array.isArray(keys) || keys.length === 0) {
+        return res.status(400).json({ error: '"keys" must be a non-empty array' });
+    }
+    if (keys.length > config.MAX_BATCH_SIZE) {
+        return res.status(400).json({ error: `Max ${config.MAX_BATCH_SIZE} keys per batch` });
+    }
+
+    try {
+        const fullKeys = keys.map(k => nsKey(req.namespace, k));
+        const deleted = await client.del(fullKeys);
+        res.json({ success: true, requested: keys.length, deleted });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/cache/keys?pattern=user:* — List keys (SCAN)
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/keys', readLimiter, async (req, res) => {

@@ -98,6 +98,10 @@ function createCacheClient({ url, apiKey, namespace = 'default', timeout, retrie
             return (await request(`/api/cache/batch?keys=${keys.map(encodeURIComponent).join(',')}`)).result;
         },
 
+        async deleteMany(keys) {
+            return request('/api/cache/batch', { method: 'DELETE', body: JSON.stringify({ keys }) });
+        },
+
         // ─── Pattern/Tags ────────────────────────────────────────────────────
         async keys(pattern = '*', limit = 100) {
             return (await request(`/api/cache/keys?pattern=${encodeURIComponent(pattern)}&limit=${limit}`)).keys;
