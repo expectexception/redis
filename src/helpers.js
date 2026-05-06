@@ -1,3 +1,4 @@
+const zlib = require('zlib');
 const config = require('./config');
 
 /**
@@ -92,9 +93,28 @@ function serialize(value, tags = []) {
 
     // First pass: measure size of the content (without _sz being accurate)
     const probe = JSON.stringify(envelope);
-    // Second pass: write the real byte count into _sz
-    envelope._sz = Buffer.byteLength(probe);
-    return JSON.stringify(envelope);
+    const finalSize = Buffer.byteLength(probe);
+    envelope._sz = finalSize;
+
+    const finalString = JSON.stringify(envelope);
+
+    // Compress with Gzip if larger than 2KB to save memory & fragmentation
+    if (finalSize > 2048) {
+        try {
+            const compressed = zlib.gzipSync(finalString);
+            const compressedEnvelope = {
+                _v: 2,
+                _c: 'gzip',
+                _sz: finalSize,
+                d: compressed.toString('base64'),
+            };
+            return JSON.stringify(compressedEnvelope);
+        } catch (err) {
+            console.error('Compression failed, falling back to uncompressed:', err.message);
+        }
+    }
+
+    return finalString;
 }
 
 /**
@@ -104,7 +124,13 @@ function deserialize(raw) {
     if (raw === null || raw === undefined) return null;
 
     try {
-        const envelope = JSON.parse(raw);
+        let envelope = JSON.parse(raw);
+
+        // Decompress if compressed
+        if (envelope && envelope._v === 2 && envelope._c === 'gzip') {
+            const decompressed = zlib.gunzipSync(Buffer.from(envelope.d, 'base64')).toString();
+            envelope = JSON.parse(decompressed);
+        }
 
         // v2 envelope (type-safe)
         if (envelope && envelope._v === 2) {

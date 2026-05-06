@@ -70,6 +70,11 @@ app.use((req, res, next) => {
         if (!res.headersSent) {
             const ms = Number(process.hrtime.bigint() - req.startTime) / 1e6;
             res.setHeader('X-Response-Time', `${ms.toFixed(2)}ms`);
+            
+            // Slow Query Alert Logger
+            if (ms > 100) {
+                console.warn(`🐢 SLOW REQUEST: ${req.method} ${req.originalUrl} took ${ms.toFixed(2)}ms (ID: ${req.requestId})`);
+            }
         }
         return origEnd.apply(this, args);
     };

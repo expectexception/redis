@@ -26,8 +26,15 @@ router.post('/', writeLimiter, async (req, res) => {
     try {
         const safeTTL = sanitizeTTL(ttl);
         const fullKey = nsKey(req.namespace, key);
+        
+        const existing = await client.get(fullKey);
         const pipeline = client.multi();
-        pipeline.setEx(fullKey, safeTTL, serialized);
+
+        if (existing === serialized) {
+            pipeline.expire(fullKey, safeTTL);
+        } else {
+            pipeline.setEx(fullKey, safeTTL, serialized);
+        }
 
         if (Array.isArray(tags) && tags.length > 0) {
             for (const tag of tags) {
@@ -37,8 +44,13 @@ router.post('/', writeLimiter, async (req, res) => {
                 pipeline.expire(tagKey, safeTTL + 3600);
             }
         }
+
+        // Release stampede lock early!
+        const lockKey = nsKey(req.namespace, `__lock:${key}`);
+        pipeline.del(lockKey);
+
         await pipeline.exec();
-        res.json({ success: true, key, namespace: req.namespace, ttl: safeTTL });
+        res.json({ success: true, key, namespace: req.namespace, ttl: safeTTL, unchanged: existing === serialized });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -59,8 +71,12 @@ router.post('/batch', writeLimiter, async (req, res) => {
     const safeTTL = sanitizeTTL(ttl);
     const errors = [];
     try {
+        const keysToFetch = entries.map(e => nsKey(req.namespace, e.key));
+        const existingVals = keysToFetch.length > 0 ? await client.mGet(keysToFetch) : [];
+
         const pipeline = client.multi();
         let written = 0;
+        let skipped = 0;
 
         for (let i = 0; i < entries.length; i++) {
             const entry = entries[i];
@@ -73,12 +89,27 @@ router.post('/batch', writeLimiter, async (req, res) => {
             const sizeErr = validateValueSize(serialized);
             if (sizeErr) { errors.push({ index: i, key: entry.key, error: sizeErr }); continue; }
 
-            pipeline.setEx(nsKey(req.namespace, entry.key), entryTTL, serialized);
-            written++;
+            const fullKey = keysToFetch[i];
+            if (existingVals[i] === serialized) {
+                pipeline.expire(fullKey, entryTTL);
+                skipped++;
+            } else {
+                pipeline.setEx(fullKey, entryTTL, serialized);
+                written++;
+            }
+
+            // Fix tag indexing in batch
+            if (Array.isArray(entry.tags) && entry.tags.length > 0) {
+                for (const tag of entry.tags) {
+                    const tagKey = nsKey(req.namespace, `__tag:${tag}`);
+                    pipeline.sAdd(tagKey, fullKey);
+                    pipeline.expire(tagKey, entryTTL + 3600);
+                }
+            }
         }
 
-        if (written > 0) await pipeline.exec();
-        res.json({ success: true, written, skipped: errors.length, errors: errors.length ? errors : undefined, ttl: safeTTL });
+        if (written > 0 || skipped > 0) await pipeline.exec();
+        res.json({ success: true, written, skippedUnchanged: skipped, skippedErrors: errors.length, errors: errors.length ? errors : undefined, ttl: safeTTL });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -528,6 +559,21 @@ router.get('/stats', readLimiter, async (req, res) => {
                 memory: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`,
             },
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/cache/stats/history
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/stats/history', readLimiter, async (req, res) => {
+    try {
+        const rawHistory = await client.lRange('__system::stats_snapshots', 0, -1);
+        const history = rawHistory.map(item => {
+            try { return JSON.parse(item); } catch { return item; }
+        });
+        res.json({ success: true, count: history.length, history });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
